@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: brain-tasks-app-service
+  namespace: default
+  labels:
+    app: brain-tasks-app
+  annotations:
+    # AWS Load Balancer Controller annotations
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+spec:
+  type: LoadBalancer
+  selector:
+    app: brain-tasks-app
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 3000

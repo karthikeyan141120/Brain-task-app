@@ -1,0 +1,76 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: "us-east-1"               # Change to your region
+    ECR_REPO_NAME: "brain-tasks-app"
+    EKS_CLUSTER_NAME: "brain-tasks-cluster"
+    K8S_NAMESPACE: "default"
+    IMAGE_TAG: "latest"
+
+phases:
+  install:
+    runtime-versions:
+      docker: 20
+    commands:
+      - echo "=== Install Phase: Installing kubectl and aws-iam-authenticator ==="
+      - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      - chmod +x kubectl
+      - mv kubectl /usr/local/bin/kubectl
+      - kubectl version --client
+
+  pre_build:
+    commands:
+      - echo "=== Pre-Build Phase ==="
+      - echo "Logging in to Amazon ECR..."
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - echo "ECR Registry: $ECR_REGISTRY"
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG_HASH="${COMMIT_HASH:-latest}"
+      - echo "Image tag will be - $IMAGE_TAG_HASH"
+
+  build:
+    commands:
+      - echo "=== Build Phase: Building Docker image ==="
+      - docker build -t $ECR_REPO_NAME:$IMAGE_TAG_HASH .
+      - docker tag $ECR_REPO_NAME:$IMAGE_TAG_HASH $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG_HASH
+      - docker tag $ECR_REPO_NAME:$IMAGE_TAG_HASH $ECR_REGISTRY/$ECR_REPO_NAME:latest
+      - echo "Build completed. Verifying image..."
+      - docker images | grep $ECR_REPO_NAME
+
+  post_build:
+    commands:
+      - echo "=== Post-Build Phase: Pushing to ECR and Deploying to EKS ==="
+      - echo "Pushing Docker images to ECR..."
+      - docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG_HASH
+      - docker push $ECR_REGISTRY/$ECR_REPO_NAME:latest
+      - echo "Docker push completed."
+
+      - echo "Updating kubeconfig for EKS cluster..."
+      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+      - kubectl get nodes
+
+      - echo "Updating image in deployment manifest..."
+      - sed -i "s|<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com|$ECR_REGISTRY|g" k8s/deployment.yaml
+      - sed -i "s|brain-tasks-app:latest|$ECR_REPO_NAME:$IMAGE_TAG_HASH|g" k8s/deployment.yaml
+
+      - echo "Applying Kubernetes manifests..."
+      - kubectl apply -f k8s/deployment.yaml -n $K8S_NAMESPACE
+      - kubectl apply -f k8s/service.yaml -n $K8S_NAMESPACE
+
+      - echo "Waiting for rollout to complete..."
+      - kubectl rollout status deployment/brain-tasks-app -n $K8S_NAMESPACE --timeout=180s
+
+      - echo "=== Deployment Summary ==="
+      - kubectl get pods -n $K8S_NAMESPACE -l app=brain-tasks-app
+      - kubectl get svc brain-tasks-app-service -n $K8S_NAMESPACE
+      - echo "Fetching LoadBalancer hostname (may take ~2 min to provision)..."
+      - kubectl get svc brain-tasks-app-service -n $K8S_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+artifacts:
+  files:
+    - k8s/deployment.yaml
+    - k8s/service.yaml
+    - buildspec.yml
